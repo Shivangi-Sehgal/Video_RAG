@@ -7,24 +7,35 @@ def _get_timeline(collection: chromadb.Collection)->str:
     results = collection.get(include=["documents", "metadatas"])
 
     print("\n ==========RAW RESULTS FROM CHROMDB==============")
-    print("Total frames stored:" , len(results["documents"]))
+    print("Total records stored:", len(results["documents"]))
+    
+    if not results["documents"]:
+        return ""
+
     print("First Document:", results["documents"][0])
     print("First metadata:", results["metadatas"][0])
 
-    frames = sorted(
+    items = sorted(
         zip(results["documents"], results["metadatas"]),
-        key=lambda x:x[1]["timestamp"],
+        key=lambda x: x[1].get("timestamp", 0.0),
     )
 
     print("\n =============AFTER SORTING BY TIMESTAMP=================")
-    for doc, meta in frames:
-        print(f"[{meta['timestamp_str']}]:{doc[:60]}...")
+    for doc, meta in items:
+        item_type = meta.get("type", "frame")
+        prefix = "Visual" if item_type == "frame" else "Spoken"
+        print(f"[{meta['timestamp_str']}] ({prefix}): {doc[:60]}...")
 
-    timeline = "\n".join(f"[{meta['timestamp_str']}]: {doc}" for doc, meta in frames)
+    timeline_lines = []
+    for doc, meta in items:
+        item_type = meta.get("type", "frame")
+        prefix = "Visual" if item_type == "frame" else "Spoken"
+        timeline_lines.append(f"[{meta['timestamp_str']}] ({prefix}): {doc}")
+
+    timeline = "\n".join(timeline_lines)
 
     print("\n--- FINAL TIMELINE STRING (sent to GPT) ---")
     print(timeline[:300], "...")
-
 
     return timeline
 

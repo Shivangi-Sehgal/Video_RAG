@@ -31,91 +31,91 @@ def embed_query(client: OpenAI, question: str) -> list[float]:
     return response.data[0].embedding
 
 
-def retrieve_frames(
+def retrieve_context(
        collection : chromadb.Collection,
        query_vector : list[float], 
-)-> list[dict]:
-    
-    """Search ChromaDB for the frames most semantically similar to the question"""
+)-> tuple[list[dict], list[dict]]:
+    """Search ChromaDB for the frames and transcript chunks most semantically similar to the question"""
 
+    # Query ChromaDB for twice the top-k results to ensure we retrieve a mix of frames and transcripts
     results = collection.query(
         query_embeddings=[query_vector],
-        n_results=config.TOP_K_RESULTS,
-        include=["documents","metadatas","distances"]
+        n_results=config.TOP_K_RESULTS * 2,
+        include=["documents", "metadatas", "distances"]
     )
 
     frames = []
+    transcripts = []
+
+    if not results or not results["documents"] or not results["documents"][0]:
+        return frames, transcripts
 
     for doc, meta, dist in zip(
         results["documents"][0],
         results["metadatas"][0],
         results["distances"][0],
     ):
-        frames.append({
-            "description" : doc,
-            "timestamp_str" : meta["timestamp_str"],
-            "frame_path" : meta["frame_path"],
-            "similarity" : 1 - dist,
-        })
+        item_type = meta.get("type", "frame")
+        if item_type == "frame":
+            frames.append({
+                "description": doc,
+                "timestamp_str": meta.get("timestamp_str", "00:00"),
+                "frame_path": meta.get("frame_path", ""),
+                "similarity": 1 - dist,
+                "timestamp": meta.get("timestamp", 0.0),
+            })
+        else:
+            transcripts.append({
+                "text": doc,
+                "timestamp_str": meta.get("timestamp_str", "00:00"),
+                "similarity": 1 - dist,
+                "timestamp": meta.get("timestamp", 0.0),
+            })
     
-    frames.sort(key=lambda x: x["timestamp_str"])
-    return frames
+    # Sort both chronologically
+    frames.sort(key=lambda x: x["timestamp"])
+    transcripts.sort(key=lambda x: x["timestamp"])
+    
+    # Return top K results for each modality
+    return frames[:config.TOP_K_RESULTS], transcripts[:config.TOP_K_RESULTS]
 
-# def answer_question(
-#         client : genai.Client,
-#         question : str,
-#         frames : list[dict],
-# )-> str:
-#     """Send the retrived frame images to Gemini and get a visual answer"""
-#     contents = []
 
-#     context_prompt = (
-#         f"You are answering a question about a video. "
-#         f"You have been given {len(frames)} frames retrived from the video"
-#         f"that are most relevant to the question."
-#         f"Each frame is labeled with its timestamp. "
-#         f"Answer the question based on what you see in these frames."
-#     )
+def answer_question(client: OpenAI, question: str, frames: list[dict], transcripts: list[dict] = None) -> str:
+    if transcripts is None:
+        transcripts = []
 
-#     contents.append(types.Part.from_text(text=context_prompt))
-
-#     for frame in frames:
-#         contents.append(
-#             types.Part.from_text(text=f"\n[Frame at {frame['timestamp_str']}]")
-#         )
-#         with open(frame["frame_path"], "rb") as f:
-#             img_bytes = f.read()
-#             contents.append(
-#                 types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
-#             )
-
-#     contents.append(types.Part.from_text(text=f"\nQuestion:{question}"))
-
-#     response = client.models.generate_content(
-#         model = config.VISION_MODEL,
-#         contents=contents,
-#     )
-#     return response.text.strip()
-
-def answer_question(client: OpenAI, question: str, frames: list[dict]) -> str:
     context_prompt = (
-        f"You are answering a question about a video. "
-        f"You have been given {len(frames)} frames retrieved from the video "
-        f"that are most relevant to the question. "
-        f"Each frame is labeled with its timestamp. "
-        f"Answer the question based on what you see in these frames."
+        f"You are answering a question about a video.\n"
+        f"You have been given context retrieved from the video (both visual frames and audio/spoken transcripts) "
+        f"that are most relevant to the question.\n"
+        f"Use both the visual frame content and the spoken words to provide a complete and accurate answer. "
+        f"If the visual frame is static, blank, or empty, rely more heavily on the audio transcripts.\n"
     )
 
     content = [{"type": "text", "text": context_prompt}]
 
-    for frame in frames:
-        content.append({"type": "text", "text": f"\n[Frame at {frame['timestamp_str']}]"})
-        with open(frame["frame_path"], "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
-        })
+    # 1. Add Audio Transcript context
+    if transcripts:
+        transcript_context = "\n### RELEVANT AUDIO TRANSCRIPT CHUNKS:\n"
+        for t in transcripts:
+            transcript_context += f"[{t['timestamp_str']}]: \"{t['text']}\"\n"
+        content.append({"type": "text", "text": transcript_context})
+
+    # 2. Add Visual Frame context
+    if frames:
+        content.append({"type": "text", "text": "\n### RELEVANT VISUAL FRAMES:\n"})
+        for frame in frames:
+            content.append({"type": "text", "text": f"\n[Frame at {frame['timestamp_str']} - Visual Description: {frame['description']}]"})
+            try:
+                with open(frame["frame_path"], "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode()
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+                })
+            except Exception as e:
+                # Handle cases where the frame image file is missing
+                pass
 
     content.append({"type": "text", "text": f"\nQuestion: {question}"})
 
@@ -128,12 +128,10 @@ def answer_question(client: OpenAI, question: str, frames: list[dict]) -> str:
 
 # This is called Multimodal RAG
 # Because:
-
 # retrieval text embeddings pe ho raha hai
-# final answering actual images dekh ke ho raha hai
-
+# final answering actual images and audio transcripts dekh ke ho raha hai
 # So:
-# semantic retrieval + visual reasoning together.
+# semantic retrieval + visual reasoning + audio context together.
 
 def ask(
     client : OpenAI,
@@ -141,13 +139,13 @@ def ask(
     question : str,
 )-> str:
     """
-    Single entry point for the CLI: embed question, retrieve frames, answer.
-    Hides the three step pipeline behind one clean call.
+    Single entry point for the CLI: embed question, retrieve context, answer.
+    Hides the multimodal pipeline behind one clean call.
     """
     query_vector = embed_query(client, question)
-    frames = retrieve_frames(collection, query_vector)
+    frames, transcripts = retrieve_context(collection, query_vector)
 
-    if not frames:
-        return "No relevant frames found for that question."
+    if not frames and not transcripts:
+        return "No relevant frames or audio transcripts found for that question."
     
-    return answer_question(client, question, frames)
+    return answer_question(client, question, frames, transcripts)

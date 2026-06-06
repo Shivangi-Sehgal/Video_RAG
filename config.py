@@ -21,6 +21,7 @@ EMBED_DIM: int = 3072
 FRAME_INTERVAL_SECONDS: int = 30
 JPEG_QUALITY: int = 85
 VIDEO_FORMAT: str = "bestvideo[height<=720][ext=mp4]/best[height<=720]"
+FRAME_HASH_THRESHOLD: int = 4  # Hamming distance threshold for duplicate frames (0-64)
 
 #-VECTOR STORE------------------------------------------------
 # COLLECTION_NAME: str = "video_frames"
